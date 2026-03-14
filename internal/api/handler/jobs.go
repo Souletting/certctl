@@ -1,0 +1,128 @@
+package handler
+
+import (
+	"net/http"
+	"strconv"
+	"strings"
+
+	"github.com/shankar0123/certctl/internal/api/middleware"
+	"github.com/shankar0123/certctl/internal/domain"
+)
+
+// JobService defines the service interface for job operations.
+type JobService interface {
+	ListJobs(status, jobType string, page, perPage int) ([]domain.Job, int64, error)
+	GetJob(id string) (*domain.Job, error)
+	CancelJob(id string) error
+}
+
+// JobHandler handles HTTP requests for job operations.
+type JobHandler struct {
+	svc JobService
+}
+
+// NewJobHandler creates a new JobHandler with a service dependency.
+func NewJobHandler(svc JobService) JobHandler {
+	return JobHandler{svc: svc}
+}
+
+// ListJobs lists jobs with optional filtering by status and type.
+// GET /api/v1/jobs?status=Pending&type=Renewal&page=1&per_page=50
+func (h JobHandler) ListJobs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		Error(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	requestID := middleware.GetRequestID(r.Context())
+
+	query := r.URL.Query()
+	status := query.Get("status")
+	jobType := query.Get("type")
+
+	page := 1
+	perPage := 50
+	if p := query.Get("page"); p != "" {
+		if parsed, err := strconv.Atoi(p); err == nil && parsed > 0 {
+			page = parsed
+		}
+	}
+	if pp := query.Get("per_page"); pp != "" {
+		if parsed, err := strconv.Atoi(pp); err == nil && parsed > 0 && parsed <= 500 {
+			perPage = parsed
+		}
+	}
+
+	jobs, total, err := h.svc.ListJobs(status, jobType, page, perPage)
+	if err != nil {
+		ErrorWithRequestID(w, http.StatusInternalServerError, "Failed to list jobs", requestID)
+		return
+	}
+
+	response := PagedResponse{
+		Data:    jobs,
+		Total:   total,
+		Page:    page,
+		PerPage: perPage,
+	}
+
+	JSON(w, http.StatusOK, response)
+}
+
+// GetJob retrieves a single job by ID.
+// GET /api/v1/jobs/{id}
+func (h JobHandler) GetJob(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		Error(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	requestID := middleware.GetRequestID(r.Context())
+
+	id := strings.TrimPrefix(r.URL.Path, "/api/v1/jobs/")
+	parts := strings.Split(id, "/")
+	if len(parts) == 0 || parts[0] == "" {
+		ErrorWithRequestID(w, http.StatusBadRequest, "Job ID is required", requestID)
+		return
+	}
+	id = parts[0]
+
+	job, err := h.svc.GetJob(id)
+	if err != nil {
+		ErrorWithRequestID(w, http.StatusNotFound, "Job not found", requestID)
+		return
+	}
+
+	JSON(w, http.StatusOK, job)
+}
+
+// CancelJob cancels a job.
+// POST /api/v1/jobs/{id}/cancel
+func (h JobHandler) CancelJob(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		Error(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	requestID := middleware.GetRequestID(r.Context())
+
+	// Extract job ID from path /api/v1/jobs/{id}/cancel
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/jobs/")
+	parts := strings.Split(path, "/")
+	if len(parts) < 2 || parts[0] == "" {
+		ErrorWithRequestID(w, http.StatusBadRequest, "Job ID is required", requestID)
+		return
+	}
+	jobID := parts[0]
+
+	if err := h.svc.CancelJob(jobID); err != nil {
+		ErrorWithRequestID(w, http.StatusInternalServerError, "Failed to cancel job", requestID)
+		return
+	}
+
+	response := map[string]string{
+		"status": "job_cancelled",
+	}
+
+	JSON(w, http.StatusOK, response)
+}

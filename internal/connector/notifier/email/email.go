@@ -1,0 +1,270 @@
+package email
+
+import (
+	"context"
+	"crypto/tls"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/smtp"
+	"strings"
+	"time"
+
+	"github.com/shankar0123/certctl/internal/connector/notifier"
+)
+
+// Config represents the email notifier configuration.
+type Config struct {
+	SMTPHost    string `json:"smtp_host"`
+	SMTPPort    int    `json:"smtp_port"`
+	Username    string `json:"username"`
+	Password    string `json:"password"`
+	FromAddress string `json:"from_address"`
+	UseTLS      bool   `json:"tls"`
+}
+
+// Connector implements the notifier.Connector interface for email notifications.
+// It sends alert and event notifications via SMTP.
+type Connector struct {
+	config *Config
+	logger *slog.Logger
+}
+
+// New creates a new email notifier with the given configuration and logger.
+func New(config *Config, logger *slog.Logger) *Connector {
+	return &Connector{
+		config: config,
+		logger: logger,
+	}
+}
+
+// ValidateConfig checks that the SMTP server is reachable and credentials are valid.
+// It attempts to connect to the SMTP server to verify connectivity.
+func (c *Connector) ValidateConfig(ctx context.Context, rawConfig json.RawMessage) error {
+	var cfg Config
+	if err := json.Unmarshal(rawConfig, &cfg); err != nil {
+		return fmt.Errorf("invalid email config: %w", err)
+	}
+
+	if cfg.SMTPHost == "" || cfg.SMTPPort == 0 || cfg.FromAddress == "" {
+		return fmt.Errorf("email smtp_host, smtp_port, and from_address are required")
+	}
+
+	c.logger.Info("validating email configuration",
+		"smtp_host", cfg.SMTPHost,
+		"smtp_port", cfg.SMTPPort)
+
+	// Test SMTP connectivity with timeout
+	addr := fmt.Sprintf("%s:%d", cfg.SMTPHost, cfg.SMTPPort)
+	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
+	if err != nil {
+		return fmt.Errorf("failed to reach SMTP server %s: %w", addr, err)
+	}
+	defer conn.Close()
+
+	c.config = &cfg
+	c.logger.Info("email configuration validated")
+	return nil
+}
+
+// SendAlert sends an alert notification via SMTP.
+// It formats the alert as an email message and sends it to the recipient.
+func (c *Connector) SendAlert(ctx context.Context, alert notifier.Alert) error {
+	c.logger.Info("sending email alert",
+		"alert_id", alert.ID,
+		"severity", alert.Severity,
+		"recipient", alert.Recipient)
+
+	// Format email subject and body
+	subject := fmt.Sprintf("[%s] %s", strings.ToUpper(alert.Severity), alert.Subject)
+	body := c.formatAlertBody(alert)
+
+	// Send email
+	if err := c.sendEmail(ctx, alert.Recipient, subject, body); err != nil {
+		c.logger.Error("failed to send alert email",
+			"alert_id", alert.ID,
+			"error", err)
+		return fmt.Errorf("failed to send alert email: %w", err)
+	}
+
+	c.logger.Info("alert email sent successfully",
+		"alert_id", alert.ID,
+		"recipient", alert.Recipient)
+	return nil
+}
+
+// SendEvent sends an event notification via SMTP.
+// It formats the event as an email message and sends it to the recipient.
+func (c *Connector) SendEvent(ctx context.Context, event notifier.Event) error {
+	c.logger.Info("sending email event",
+		"event_id", event.ID,
+		"event_type", event.Type,
+		"recipient", event.Recipient)
+
+	// Format email subject and body
+	subject := fmt.Sprintf("[Event] %s", event.Subject)
+	body := c.formatEventBody(event)
+
+	// Send email
+	if err := c.sendEmail(ctx, event.Recipient, subject, body); err != nil {
+		c.logger.Error("failed to send event email",
+			"event_id", event.ID,
+			"error", err)
+		return fmt.Errorf("failed to send event email: %w", err)
+	}
+
+	c.logger.Info("event email sent successfully",
+		"event_id", event.ID,
+		"recipient", event.Recipient)
+	return nil
+}
+
+// sendEmail sends an email message using the configured SMTP server.
+// It handles both TLS and plain authentication modes.
+func (c *Connector) sendEmail(ctx context.Context, to, subject, body string) error {
+	addr := fmt.Sprintf("%s:%d", c.config.SMTPHost, c.config.SMTPPort)
+
+	// Connect to SMTP server
+	var auth smtp.Auth
+	if c.config.Username != "" && c.config.Password != "" {
+		auth = smtp.PlainAuth("", c.config.Username, c.config.Password, c.config.SMTPHost)
+	}
+
+	var conn net.Conn
+	var err error
+
+	if c.config.UseTLS {
+		// Connect with TLS
+		tlsConfig := &tls.Config{
+			ServerName: c.config.SMTPHost,
+		}
+		conn, err = tls.Dial("tcp", addr, tlsConfig)
+		if err != nil {
+			return fmt.Errorf("failed to connect via TLS: %w", err)
+		}
+	} else {
+		// Connect without TLS
+		conn, err = net.Dial("tcp", addr)
+		if err != nil {
+			return fmt.Errorf("failed to connect: %w", err)
+		}
+	}
+	defer conn.Close()
+
+	// Create SMTP client
+	client, err := smtp.NewClient(conn, c.config.SMTPHost)
+	if err != nil {
+		return fmt.Errorf("failed to create SMTP client: %w", err)
+	}
+	defer client.Close()
+
+	// Authenticate if credentials provided
+	if auth != nil {
+		if err := client.Auth(auth); err != nil {
+			return fmt.Errorf("SMTP authentication failed: %w", err)
+		}
+	}
+
+	// Send email
+	if err := client.Mail(c.config.FromAddress); err != nil {
+		return fmt.Errorf("failed to set sender: %w", err)
+	}
+
+	if err := client.Rcpt(to); err != nil {
+		return fmt.Errorf("failed to set recipient: %w", err)
+	}
+
+	wc, err := client.Data()
+	if err != nil {
+		return fmt.Errorf("failed to get data writer: %w", err)
+	}
+	defer wc.Close()
+
+	// Format and write email headers and body
+	message := c.formatEmailMessage(c.config.FromAddress, to, subject, body)
+	if _, err := wc.Write(message); err != nil {
+		return fmt.Errorf("failed to write message: %w", err)
+	}
+
+	if err := client.Quit(); err != nil {
+		return fmt.Errorf("failed to quit SMTP: %w", err)
+	}
+
+	return nil
+}
+
+// formatEmailMessage formats an email message with standard headers.
+func (c *Connector) formatEmailMessage(from, to, subject, body string) []byte {
+	message := fmt.Sprintf(
+		"From: %s\r\nTo: %s\r\nSubject: %s\r\nDate: %s\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n%s",
+		from,
+		to,
+		subject,
+		time.Now().Format(time.RFC1123Z),
+		body,
+	)
+	return []byte(message)
+}
+
+// formatAlertBody formats an alert notification as email body text.
+func (c *Connector) formatAlertBody(alert notifier.Alert) string {
+	body := fmt.Sprintf(`
+Certificate Alert Notification
+================================
+
+Alert ID: %s
+Type: %s
+Severity: %s
+Created: %s
+
+Subject: %s
+
+Message:
+%s
+
+%s
+`, alert.ID, alert.Type, alert.Severity, alert.CreatedAt.Format(time.RFC3339), alert.Subject, alert.Message, c.formatMetadata(alert.Metadata))
+
+	return body
+}
+
+// formatEventBody formats an event notification as email body text.
+func (c *Connector) formatEventBody(event notifier.Event) string {
+	certInfo := ""
+	if event.CertificateID != nil {
+		certInfo = fmt.Sprintf("Certificate ID: %s\n", *event.CertificateID)
+	}
+
+	body := fmt.Sprintf(`
+Certificate Event Notification
+================================
+
+Event ID: %s
+Type: %s
+Created: %s
+
+%sSubject: %s
+
+Body:
+%s
+
+%s
+`, event.ID, event.Type, event.CreatedAt.Format(time.RFC3339), certInfo, event.Subject, event.Body, c.formatMetadata(event.Metadata))
+
+	return body
+}
+
+// formatMetadata formats metadata as a readable string.
+func (c *Connector) formatMetadata(metadata map[string]string) string {
+	if len(metadata) == 0 {
+		return ""
+	}
+
+	metadataStr := "\nMetadata:\n"
+	for key, value := range metadata {
+		metadataStr += fmt.Sprintf("  %s: %s\n", key, value)
+	}
+
+	return metadataStr
+}

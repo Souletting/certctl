@@ -1,0 +1,112 @@
+version: '3.8'
+
+services:
+  # PostgreSQL database
+  postgres:
+    image: postgres:16-alpine
+    container_name: certctl-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-certctl}
+      POSTGRES_USER: ${POSTGRES_USER:-certctl}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-certctl}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - certctl-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-certctl} -d ${POSTGRES_DB:-certctl}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Certctl Server
+  certctl-server:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: certctl-server
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Database configuration
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: ${POSTGRES_USER:-certctl}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-certctl}
+      DB_NAME: ${POSTGRES_DB:-certctl}
+      DB_SSL_MODE: disable
+
+      # Server configuration
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: 8443
+      LOG_LEVEL: info
+
+      # ACME Configuration (example: Let's Encrypt staging)
+      ACME_DIRECTORY_URL: https://acme-staging-v02.api.letsencrypt.org/directory
+      ACME_EMAIL: ${ACME_EMAIL:-admin@example.com}
+
+      # SMTP Configuration (for email notifications)
+      SMTP_HOST: ${SMTP_HOST:-smtp.example.com}
+      SMTP_PORT: 587
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM_ADDRESS: ${SMTP_FROM_ADDRESS:-certctl@example.com}
+
+      # Webhook Configuration (optional)
+      WEBHOOK_URL: ${WEBHOOK_URL:-}
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-}
+    ports:
+      - "${SERVER_PORT:-8443}:8443"
+    networks:
+      - certctl-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8443/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+    logs:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Certctl Agent
+  certctl-agent:
+    build:
+      context: ..
+      dockerfile: Dockerfile.agent
+    container_name: certctl-agent
+    depends_on:
+      certctl-server:
+        condition: service_healthy
+    environment:
+      # Server configuration
+      SERVER_URL: http://certctl-server:8443
+      API_KEY: ${AGENT_API_KEY:-change-me-in-production}
+      AGENT_NAME: ${AGENT_NAME:-docker-agent}
+
+      # Agent configuration
+      LOG_LEVEL: info
+      CHECK_INTERVAL: 60s
+    networks:
+      - certctl-network
+    restart: unless-stopped
+    logs:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  certctl-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+    driver: local

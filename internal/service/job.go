@@ -1,0 +1,199 @@
+package service
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+
+	"github.com/shankar0123/certctl/internal/domain"
+	"github.com/shankar0123/certctl/internal/repository"
+)
+
+// JobService manages job processing and status tracking.
+// It coordinates between the scheduler and various job-specific services.
+type JobService struct {
+	jobRepo              repository.JobRepository
+	renewalService       *RenewalService
+	deploymentService    *DeploymentService
+	logger               *slog.Logger
+}
+
+// NewJobService creates a new job service.
+func NewJobService(
+	jobRepo repository.JobRepository,
+	renewalService *RenewalService,
+	deploymentService *DeploymentService,
+	logger *slog.Logger,
+) *JobService {
+	return &JobService{
+		jobRepo:           jobRepo,
+		renewalService:    renewalService,
+		deploymentService: deploymentService,
+		logger:            logger,
+	}
+}
+
+// ProcessPendingJobs fetches and processes all pending jobs.
+// It routes jobs to the appropriate service based on job type and handles errors gracefully.
+func (s *JobService) ProcessPendingJobs(ctx context.Context) error {
+	// Fetch pending jobs
+	pendingJobs, err := s.jobRepo.ListByStatus(ctx, domain.JobStatusPending)
+	if err != nil {
+		return fmt.Errorf("failed to list pending jobs: %w", err)
+	}
+
+	if len(pendingJobs) == 0 {
+		s.logger.Debug("no pending jobs to process")
+		return nil
+	}
+
+	s.logger.Info("processing pending jobs", "count", len(pendingJobs))
+
+	var processedCount int
+	var failedCount int
+
+	// Process each job
+	for _, job := range pendingJobs {
+		if err := s.processJob(ctx, job); err != nil {
+			s.logger.Error("failed to process job",
+				"job_id", job.ID,
+				"job_type", job.Type,
+				"error", err)
+			failedCount++
+			continue
+		}
+		processedCount++
+	}
+
+	s.logger.Info("job processing completed",
+		"processed", processedCount,
+		"failed", failedCount,
+		"total", len(pendingJobs))
+
+	return nil
+}
+
+// processJob routes a single job to the appropriate service based on type.
+func (s *JobService) processJob(ctx context.Context, job *domain.Job) error {
+	s.logger.Debug("processing job",
+		"job_id", job.ID,
+		"job_type", job.Type,
+		"certificate_id", job.CertificateID)
+
+	switch job.Type {
+	case domain.JobTypeRenewal:
+		return s.renewalService.ProcessRenewalJob(ctx, job)
+	case domain.JobTypeDeployment:
+		return s.deploymentService.ProcessDeploymentJob(ctx, job)
+	case domain.JobTypeIssuance:
+		return s.processIssuanceJob(ctx, job)
+	case domain.JobTypeValidation:
+		return s.processValidationJob(ctx, job)
+	default:
+		return fmt.Errorf("unknown job type: %s", job.Type)
+	}
+}
+
+// processIssuanceJob handles a certificate issuance job.
+// This is a placeholder that documents the flow.
+// TODO: Implement actual issuance job processing if needed.
+func (s *JobService) processIssuanceJob(ctx context.Context, job *domain.Job) error {
+	s.logger.Debug("processing issuance job", "job_id", job.ID)
+
+	// TODO: Implement issuance job processing
+	// In production:
+	//   1. Fetch the certificate
+	//   2. Fetch the issuer
+	//   3. Generate or retrieve CSR
+	//   4. Call issuer to issue new certificate
+	//   5. Create certificate version
+	//   6. Update certificate status
+	//   7. Mark job as completed
+
+	return fmt.Errorf("issuance job processing not yet implemented")
+}
+
+// processValidationJob handles a certificate validation job.
+// This is a placeholder that documents the flow.
+// TODO: Implement actual validation job processing if needed.
+func (s *JobService) processValidationJob(ctx context.Context, job *domain.Job) error {
+	s.logger.Debug("processing validation job", "job_id", job.ID)
+
+	// TODO: Implement validation job processing
+	// In production:
+	//   1. Fetch the certificate
+	//   2. For each target, call target connector ValidateDeployment
+	//   3. Aggregate results
+	//   4. Update job status based on results
+	//   5. Send notification if any validation fails
+
+	return fmt.Errorf("validation job processing not yet implemented")
+}
+
+// RetryFailedJobs finds failed jobs and resets them for retry.
+// It only retries jobs that haven't exceeded max attempts.
+func (s *JobService) RetryFailedJobs(ctx context.Context, maxRetries int) error {
+	s.logger.Debug("retrying failed jobs", "max_retries", maxRetries)
+
+	failedJobs, err := s.jobRepo.ListByStatus(ctx, domain.JobStatusFailed)
+	if err != nil {
+		return fmt.Errorf("failed to fetch failed jobs: %w", err)
+	}
+
+	var retriedCount int
+
+	for _, job := range failedJobs {
+		// Check if we can retry (Attempts < MaxAttempts)
+		if job.Attempts >= job.MaxAttempts {
+			s.logger.Debug("job exceeded max retries",
+				"job_id", job.ID,
+				"attempts", job.Attempts,
+				"max_attempts", job.MaxAttempts)
+			continue
+		}
+
+		// Reset status to pending for retry
+		if err := s.jobRepo.UpdateStatus(ctx, job.ID, domain.JobStatusPending, ""); err != nil {
+			s.logger.Error("failed to reset job status for retry",
+				"job_id", job.ID,
+				"error", err)
+			continue
+		}
+
+		retriedCount++
+	}
+
+	s.logger.Info("failed jobs retry completed",
+		"retried", retriedCount,
+		"total_failed", len(failedJobs))
+
+	return nil
+}
+
+// GetJobStatus returns the current status of a job.
+func (s *JobService) GetJobStatus(ctx context.Context, jobID string) (*domain.Job, error) {
+	job, err := s.jobRepo.Get(ctx, jobID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch job: %w", err)
+	}
+	return job, nil
+}
+
+// CancelJob cancels a pending or running job.
+func (s *JobService) CancelJob(ctx context.Context, jobID string) error {
+	job, err := s.jobRepo.Get(ctx, jobID)
+	if err != nil {
+		return fmt.Errorf("failed to fetch job: %w", err)
+	}
+
+	if job.Status != domain.JobStatusPending && job.Status != domain.JobStatusRunning {
+		return fmt.Errorf("cannot cancel job with status %s", job.Status)
+	}
+
+	if err := s.jobRepo.UpdateStatus(ctx, jobID, domain.JobStatusCancelled, "cancelled by user"); err != nil {
+		return fmt.Errorf("failed to cancel job: %w", err)
+	}
+
+	s.logger.Info("job cancelled", "job_id", jobID)
+	return nil
+}

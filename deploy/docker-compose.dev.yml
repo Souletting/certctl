@@ -1,0 +1,58 @@
+version: '3.8'
+
+# Development overrides for docker-compose.yml
+# Usage: docker-compose -f deploy/docker-compose.yml -f deploy/docker-compose.dev.yml up
+
+services:
+  # Override server configuration for development
+  certctl-server:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    environment:
+      # Verbose logging for development
+      LOG_LEVEL: debug
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: 8443
+    volumes:
+      # Mount local source for hot reload (requires air or similar)
+      # Uncomment if using air or similar for hot reload:
+      # - ../cmd:/app/cmd
+      # - ../internal:/app/internal
+      # - ../api:/app/api
+    ports:
+      - "8443:8443"
+      - "40000:40000"  # Delve debugger port (if debugging)
+
+  # Override agent configuration for development
+  certctl-agent:
+    build:
+      context: ..
+      dockerfile: Dockerfile.agent
+    environment:
+      LOG_LEVEL: debug
+
+  # PgAdmin for database exploration
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: certctl-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@example.com}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
+      PGADMIN_CONFIG_SERVER_MODE: 'False'
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: 'False'
+    ports:
+      - "${PGADMIN_PORT:-5050}:80"
+    networks:
+      - certctl-network
+    depends_on:
+      - postgres
+    restart: unless-stopped
+
+# Notes for development:
+# 1. Enable hot reload by installing air: go install github.com/cosmtrek/air@latest
+#    Then in cmd/server and cmd/agent, create .air.toml for watch configuration
+# 2. Debug the server by attaching Delve to port 40000
+# 3. Access PgAdmin at http://localhost:5050 to browse the database
+# 4. View server logs: docker-compose logs -f certctl-server
+# 5. View agent logs: docker-compose logs -f certctl-agent

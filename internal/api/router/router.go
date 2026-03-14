@@ -1,0 +1,145 @@
+package router
+
+import (
+	"net/http"
+
+	"github.com/shankar0123/certctl/internal/api/handler"
+	"github.com/shankar0123/certctl/internal/api/middleware"
+)
+
+// Router wraps http.ServeMux and manages route registration with middleware.
+type Router struct {
+	mux        *http.ServeMux
+	middleware []func(http.Handler) http.Handler
+}
+
+// New creates a new Router instance.
+func New() *Router {
+	return &Router{
+		mux:        http.NewServeMux(),
+		middleware: []func(http.Handler) http.Handler{},
+	}
+}
+
+// NewWithMiddleware creates a Router with initial middleware stack.
+func NewWithMiddleware(middlewares ...func(http.Handler) http.Handler) *Router {
+	r := New()
+	r.middleware = middlewares
+	return r
+}
+
+// ServeHTTP implements http.Handler interface.
+func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	r.mux.ServeHTTP(w, req)
+}
+
+// Register registers a handler for a given path with the middleware chain applied.
+func (r *Router) Register(pattern string, handler http.Handler) {
+	r.mux.Handle(pattern, middleware.Chain(handler, r.middleware...))
+}
+
+// RegisterFunc registers a handler function for a given path.
+func (r *Router) RegisterFunc(pattern string, handler func(http.ResponseWriter, *http.Request)) {
+	r.Register(pattern, http.HandlerFunc(handler))
+}
+
+// RegisterHandlers sets up all API routes with their handlers.
+func (r *Router) RegisterHandlers(
+	certificates handler.CertificateHandler,
+	issuers handler.IssuerHandler,
+	targets handler.TargetHandler,
+	agents handler.AgentHandler,
+	jobs handler.JobHandler,
+	policies handler.PolicyHandler,
+	teams handler.TeamHandler,
+	owners handler.OwnerHandler,
+	audit handler.AuditHandler,
+	notifications handler.NotificationHandler,
+	health handler.HealthHandler,
+) {
+	// Health endpoints (no middleware)
+	r.mux.Handle("GET /health", middleware.Chain(
+		http.HandlerFunc(health.Health),
+		middleware.CORS,
+		middleware.ContentType,
+	))
+	r.mux.Handle("GET /ready", middleware.Chain(
+		http.HandlerFunc(health.Ready),
+		middleware.CORS,
+		middleware.ContentType,
+	))
+
+	// Certificates routes: /api/v1/certificates
+	r.Register("GET /api/v1/certificates", http.HandlerFunc(certificates.ListCertificates))
+	r.Register("POST /api/v1/certificates", http.HandlerFunc(certificates.CreateCertificate))
+	r.Register("GET /api/v1/certificates/{id}", http.HandlerFunc(certificates.GetCertificate))
+	r.Register("PUT /api/v1/certificates/{id}", http.HandlerFunc(certificates.UpdateCertificate))
+	r.Register("DELETE /api/v1/certificates/{id}", http.HandlerFunc(certificates.ArchiveCertificate))
+	r.Register("GET /api/v1/certificates/{id}/versions", http.HandlerFunc(certificates.GetCertificateVersions))
+	r.Register("POST /api/v1/certificates/{id}/renew", http.HandlerFunc(certificates.TriggerRenewal))
+	r.Register("POST /api/v1/certificates/{id}/deploy", http.HandlerFunc(certificates.TriggerDeployment))
+
+	// Issuers routes: /api/v1/issuers
+	r.Register("GET /api/v1/issuers", http.HandlerFunc(issuers.ListIssuers))
+	r.Register("POST /api/v1/issuers", http.HandlerFunc(issuers.CreateIssuer))
+	r.Register("GET /api/v1/issuers/{id}", http.HandlerFunc(issuers.GetIssuer))
+	r.Register("PUT /api/v1/issuers/{id}", http.HandlerFunc(issuers.UpdateIssuer))
+	r.Register("DELETE /api/v1/issuers/{id}", http.HandlerFunc(issuers.DeleteIssuer))
+	r.Register("POST /api/v1/issuers/{id}/test", http.HandlerFunc(issuers.TestConnection))
+
+	// Targets routes: /api/v1/targets
+	r.Register("GET /api/v1/targets", http.HandlerFunc(targets.ListTargets))
+	r.Register("POST /api/v1/targets", http.HandlerFunc(targets.CreateTarget))
+	r.Register("GET /api/v1/targets/{id}", http.HandlerFunc(targets.GetTarget))
+	r.Register("PUT /api/v1/targets/{id}", http.HandlerFunc(targets.UpdateTarget))
+	r.Register("DELETE /api/v1/targets/{id}", http.HandlerFunc(targets.DeleteTarget))
+
+	// Agents routes: /api/v1/agents
+	r.Register("GET /api/v1/agents", http.HandlerFunc(agents.ListAgents))
+	r.Register("POST /api/v1/agents", http.HandlerFunc(agents.RegisterAgent))
+	r.Register("GET /api/v1/agents/{id}", http.HandlerFunc(agents.GetAgent))
+	r.Register("POST /api/v1/agents/{id}/heartbeat", http.HandlerFunc(agents.Heartbeat))
+	r.Register("POST /api/v1/agents/{id}/csr", http.HandlerFunc(agents.AgentCSRSubmit))
+	r.Register("GET /api/v1/agents/{id}/certificates/{cert_id}", http.HandlerFunc(agents.AgentCertificatePickup))
+
+	// Jobs routes: /api/v1/jobs
+	r.Register("GET /api/v1/jobs", http.HandlerFunc(jobs.ListJobs))
+	r.Register("GET /api/v1/jobs/{id}", http.HandlerFunc(jobs.GetJob))
+	r.Register("POST /api/v1/jobs/{id}/cancel", http.HandlerFunc(jobs.CancelJob))
+
+	// Policies routes: /api/v1/policies
+	r.Register("GET /api/v1/policies", http.HandlerFunc(policies.ListPolicies))
+	r.Register("POST /api/v1/policies", http.HandlerFunc(policies.CreatePolicy))
+	r.Register("GET /api/v1/policies/{id}", http.HandlerFunc(policies.GetPolicy))
+	r.Register("PUT /api/v1/policies/{id}", http.HandlerFunc(policies.UpdatePolicy))
+	r.Register("DELETE /api/v1/policies/{id}", http.HandlerFunc(policies.DeletePolicy))
+	r.Register("GET /api/v1/policies/{id}/violations", http.HandlerFunc(policies.ListViolations))
+
+	// Teams routes: /api/v1/teams
+	r.Register("GET /api/v1/teams", http.HandlerFunc(teams.ListTeams))
+	r.Register("POST /api/v1/teams", http.HandlerFunc(teams.CreateTeam))
+	r.Register("GET /api/v1/teams/{id}", http.HandlerFunc(teams.GetTeam))
+	r.Register("PUT /api/v1/teams/{id}", http.HandlerFunc(teams.UpdateTeam))
+	r.Register("DELETE /api/v1/teams/{id}", http.HandlerFunc(teams.DeleteTeam))
+
+	// Owners routes: /api/v1/owners
+	r.Register("GET /api/v1/owners", http.HandlerFunc(owners.ListOwners))
+	r.Register("POST /api/v1/owners", http.HandlerFunc(owners.CreateOwner))
+	r.Register("GET /api/v1/owners/{id}", http.HandlerFunc(owners.GetOwner))
+	r.Register("PUT /api/v1/owners/{id}", http.HandlerFunc(owners.UpdateOwner))
+	r.Register("DELETE /api/v1/owners/{id}", http.HandlerFunc(owners.DeleteOwner))
+
+	// Audit routes: /api/v1/audit
+	r.Register("GET /api/v1/audit", http.HandlerFunc(audit.ListAuditEvents))
+	r.Register("GET /api/v1/audit/{id}", http.HandlerFunc(audit.GetAuditEvent))
+
+	// Notifications routes: /api/v1/notifications
+	r.Register("GET /api/v1/notifications", http.HandlerFunc(notifications.ListNotifications))
+	r.Register("GET /api/v1/notifications/{id}", http.HandlerFunc(notifications.GetNotification))
+	r.Register("POST /api/v1/notifications/{id}/read", http.HandlerFunc(notifications.MarkAsRead))
+}
+
+// GetMux returns the underlying http.ServeMux for direct access if needed.
+func (r *Router) GetMux() *http.ServeMux {
+	return r.mux
+}
