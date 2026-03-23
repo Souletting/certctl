@@ -24,7 +24,8 @@ RUN go mod download
 COPY . .
 
 # Build server binary (use TARGETARCH for multi-platform support)
-ARG TARGETARCH=amd64
+# ARG TARGETARCH=amd64
+ARG TARGETARCH=arm64
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build \
     -ldflags="-w -s" \
     -o bin/server \
